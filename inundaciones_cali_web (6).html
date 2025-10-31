@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Historial de Inundaciones en Santiago de Cali (2010-2011)</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Firebase (opcional): v8 SDK (si vas a usar Firebase pega tu configuración abajo) -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #f5f7fa; color: #333; margin: 0; padding: 20px; }
+    header { text-align: center; margin-bottom: 20px; }
+    h1 { color: #2c3e50; }
+    .wrap { max-width:1100px; margin:0 auto; }
+    .grid { display:grid; grid-template-columns: 1fr; gap:20px; }
+    @media(min-width:900px){ .grid{ grid-template-columns: 1fr 420px; } }
+    table { width:100%; border-collapse:collapse; background:white; box-shadow:0 2px 5px rgba(0,0,0,0.1);} 
+    th, td { padding:10px; text-align:left; border-bottom:1px solid #eee; }
+    th { background:#3498db; color:white; }
+    .news-form { background:white; padding:15px; border-radius:8px; box-shadow:0 2px 5px rgba(0,0,0,0.06); }
+    input, textarea, button, select { width:100%; padding:8px; margin-bottom:8px; border-radius:6px; border:1px solid #ddd; }
+    button { background:#3498db; color:white; border:0; cursor:pointer; }
+    .chart-container { background:white; padding:15px; border-radius:8px; box-shadow:0 2px 5px rgba(0,0,0,0.06); min-height:300px; }
+    .small { font-size:13px; color:#555; }
+    .actions { display:flex; gap:8px; }
+    a.link { color:#2980b9; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Historial de Inundaciones en Santiago de Cali (2010-2011)</h1>
+      <p class="small">Lee datos desde Google Sheets, sincroniza con Firebase (opcional) y comparte una página pública.</p>
+    </header>
+
+    <div class="grid">
+      <div>
+        <div class="chart-container">
+          <canvas id="newsChart"></canvas>
+        </div>
+
+        <table id="newsTable">
+          <thead>
+            <tr><th>Año</th><th>Título</th><th>Fuente</th><th>Enlace</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <div style="display:flex; gap:8px; margin-top:10px;">
+          <button id="exportJson">Descargar JSON</button>
+          <button id="importJson">Cargar JSON</button>
+          <button id="downloadChart">Descargar gráfico</button>
+          <button id="loadSheet">Cargar desde Google Sheets</button>
+        </div>
+
+        <input type="file" id="fileInput" style="display:none" accept="application/json" />
+      </div>
+
+      <aside>
+        <div class="news-form">
+          <h3>Añadir nuevo reporte</h3>
+          <form id="addNewsForm">
+            <input type="number" id="year" placeholder="Año (ej: 2011)" required />
+            <input type="text" id="title" placeholder="Título de la noticia" required />
+            <input type="text" id="source" placeholder="Fuente (ej: El Tiempo)" required />
+            <input type="url" id="link" placeholder="Enlace a la noticia (https://...)" required />
+            <button type="submit">Añadir noticia</button>
+          </form>
+
+          <hr />
+          <h4>Configuración</h4>
+          <label class="small">Enlace CSV público (Google Sheets)</label>
+          <input id="sheetUrl" value="https://docs.google.com/spreadsheets/d/e/2PACX-1vT0kOk-fhgfhPwJaL3tARqOx6g6evxHWunjSkKpc5VeitLjYT4I0tL1kZdfzLK9CzBvq7ZCXybQIehl/pub?output=csv" />
+
+          <label class="small">Firebase (opcional) — pega aquí tu firebaseConfig JavaScript (sin comillas)</label>
+          <textarea id="firebaseConfig" placeholder="Deja en blanco si no usarás Firebase" style="height:120px; font-size:12px"></textarea>
+
+          <div class="actions">
+            <button id="enableFirebase">Conectar Firebase</button>
+            <button id="clearLocal">Borrar datos locales</button>
+          </div>
+
+          <p class="small">Nota: si pegas tu firebaseConfig en este campo y haces clic en "Conectar Firebase", la app intentará sincronizar los datos con tu Realtime Database. Por seguridad puedes dejar el campo vacío y solo usar Google Sheets.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const sheetDefault = document.getElementById('sheetUrl').value.trim();
+      const form = document.getElementById('addNewsForm');
+      const tableBody = document.querySelector('#newsTable tbody');
+      const fileInput = document.getElementById('fileInput');
+      const exportJsonBtn = document.getElementById('exportJson');
+      const importJsonBtn = document.getElementById('importJson');
+      const downloadChartBtn = document.getElementById('downloadChart');
+      const loadSheetBtn = document.getElementById('loadSheet');
+      const firebaseConfigInput = document.getElementById('firebaseConfig');
+      const enableFirebaseBtn = document.getElementById('enableFirebase');
+      const clearLocalBtn = document.getElementById('clearLocal');
+
+      // localStorage keys
+      const NEWS_LIST_KEY = 'newsList_v1';
+      const NEWS_DATA_KEY = 'newsData_v1';
+
+      // state
+      let savedNews = JSON.parse(localStorage.getItem(NEWS_LIST_KEY)) || [];
+      let newsData = JSON.parse(localStorage.getItem(NEWS_DATA_KEY)) || {};
+      let firebaseApp = null;
+      let firebaseDB = null;
+
+      // chart
+      const ctx = document.getElementById('newsChart').getContext('2d');
+      const newsChart = new Chart(ctx, {
+        type:'bar',
+        data:{ labels:Object.keys(newsData), datasets:[{ label:'Número de noticias', data:Object.values(newsData), backgroundColor:'#3498db' }]},
+        options:{ responsive:true, maintainAspectRatio:false, plugins:{ title:{ display:true, text:'Noticias sobre inundaciones (2010-2011)' }}}
+      });
+
+      function saveLocal(){
+        try{
+          localStorage.setItem(NEWS_LIST_KEY, JSON.stringify(savedNews));
+          localStorage.setItem(NEWS_DATA_KEY, JSON.stringify(newsData));
+        }catch(e){ console.warn('No se pudo guardar en localStorage:', e); }
+      }
+
+      function renderTable(){
+        tableBody.innerHTML='';
+        savedNews.forEach(item=>{
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${item.year}</td><td>${item.title}</td><td>${item.source}</td><td><a href="${item.link}" target="_blank">Ver</a></td>`;
+          tableBody.appendChild(tr);
+        });
+      }
+
+      function updateChart(){
+        newsChart.data.labels = Object.keys(newsData);
+        newsChart.data.datasets[0].data = Object.values(newsData);
+        newsChart.update();
+        saveLocal();
+      }
+
+      // add entry
+      form.addEventListener('submit', (e)=>{
+        e.preventDefault();
+        const year = document.getElementById('year').value.trim();
+        const title = document.getElementById('title').value.trim();
+        const source = document.getElementById('source').value.trim();
+        const link = document.getElementById('link').value.trim();
+        if(!year||!title) return;
+        const entry = { year, title, source, link };
+        savedNews.push(entry);
+        newsData[year] = (newsData[year]||0) + 1;
+        renderTable();
+        updateChart();
+        // push to firebase if enabled
+        if(firebaseDB){
+          try{ firebaseDB.ref('noticias').push(entry); }catch(err){ console.warn('Firebase push failed', err); }
+        }
+        form.reset();
+      });
+
+      // export JSON
+      exportJsonBtn.addEventListener('click', ()=>{
+        const blob = new Blob([JSON.stringify({savedNews, newsData}, null, 2)], {type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href=url; a.download='inundaciones_cali_data.json'; a.click(); URL.revokeObjectURL(url);
+      });
+
+      // import JSON
+      importJsonBtn.addEventListener('click', ()=> fileInput.click());
+      fileInput.addEventListener('change', (ev)=>{
+        const f = ev.target.files[0]; if(!f) return;
+        const reader = new FileReader();
+        reader.onload = ()=>{
+          try{
+            const obj = JSON.parse(reader.result);
+            if(obj.savedNews && obj.newsData){
+              savedNews = obj.savedNews; newsData = obj.newsData; renderTable(); updateChart(); saveLocal();
+              alert('Datos cargados desde JSON');
+            }else alert('JSON no tiene el formato esperado');
+          }catch(e){ alert('Error leyendo JSON: '+e.message); }
+        };
+        reader.readAsText(f);
+      });
+
+      // download chart as PNG
+      downloadChartBtn.addEventListener('click', ()=>{
+        const url = newsChart.toBase64Image('image/png', 1);
+        const a = document.createElement('a'); a.href = url; a.download='grafico_inundaciones.png'; a.click();
+      });
+
+      // clear local data
+      clearLocalBtn.addEventListener('click', ()=>{
+        if(confirm('Borrar datos locales?')){ savedNews=[]; newsData={}; renderTable(); updateChart(); saveLocal(); }
+      });
+
+      // Load CSV from Google Sheets (public CSV link)
+      async function loadFromSheet(sheetUrl){
+        try{
+          const res = await fetch(sheetUrl);
+          if(!res.ok) throw new Error('No se pudo descargar CSV');
+          const text = await res.text();
+          // parse simple CSV (asume separador coma y que la primera fila es encabezado)
+          const lines = text.split('
+').map(l=>l.trim()).filter(Boolean);
+          const rows = lines.map(l=> l.split(/,(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)/).map(c=>c.replace(/^\"|\"$/g,'')));
+          const header = rows.shift();
+          // detect columns: año,titulo,fuente,enlace (flexible)
+          const idxYear = header.findIndex(h=>/año|ano|year/i.test(h));
+          const idxTitle = header.findIndex(h=>/t[ií]tulo|title/i.test(h));
+          const idxSource = header.findIndex(h=>/fuente|source/i.test(h));
+          const idxLink = header.findIndex(h=>/enlace|link|url/i.test(h));
+          let added=0;
+          rows.forEach(r=>{
+            const year = idxYear>=0? r[idxYear] : '';
+            const title = idxTitle>=0? r[idxTitle] : (r[1]||'');
+            const source = idxSource>=0? r[idxSource] : (r[2]||'');
+            const link = idxLink>=0? r[idxLink] : (r[3]||'');
+            if(!year||!title) return;
+            const entry = { year: year.trim(), title: title.trim(), source: (source||'').trim(), link: (link||'').trim() };
+            // avoid duplicates by simple check
+            const exists = savedNews.some(s=> s.year===entry.year && s.title===entry.title);
+            if(!exists){ savedNews.push(entry); newsData[entry.year] = (newsData[entry.year]||0)+1; added++; }
+          });
+          if(added>0){ renderTable(); updateChart(); saveLocal(); alert('Se añadieron '+added+' registros desde la hoja'); }
+          else alert('No se agregaron registros nuevos');
+        }catch(e){ alert('Error al leer la hoja: '+e.message); }
+      }
+
+      // button to load sheet using current URL in input
+      loadSheetBtn.addEventListener('click', ()=>{
+        const url = document.getElementById('sheetUrl').value.trim() || sheetDefault;
+        loadFromSheet(url);
+      });
+
+      // Firebase connect (optional)
+      enableFirebaseBtn.addEventListener('click', ()=>{
+        const cfgText = firebaseConfigInput.value.trim();
+        if(!cfgText){ alert('Pega aquí tu firebaseConfig si quieres conectar Firebase (ver instrucciones en la guía)'); return; }
+        try{
+          // eslint-disable-next-line no-eval
+          const cfg = (new Function('return ('+cfgText+')'))();
+          if(!cfg||!cfg.apiKey) throw new Error('config inválida');
+          // init firebase
+          firebase.initializeApp(cfg);
+          firebaseApp = firebase.app();
+          firebaseDB = firebase.database();
+          alert('Firebase conectado (temporal)');
+
+          // push local entries to firebase (non-destructive)
+          savedNews.forEach(item=>{ try{ firebaseDB.ref('noticias').push(item); }catch(e){} });
+
+          // listen for remote changes
+          firebaseDB.ref('noticias').on('value', snapshot=>{
+            const val = snapshot.val();
+            if(!val) return;
+            // convert to array
+            const arr = Object.values(val);
+            // merge remote into local (simple dedupe)
+            let added=0;
+            arr.forEach(entry=>{
+              const exists = savedNews.some(s=> s.year===entry.year && s.title===entry.title);
+              if(!exists){ savedNews.push(entry); newsData[entry.year] = (newsData[entry.year]||0)+1; added++; }
+            });
+            if(added>0){ renderTable(); updateChart(); saveLocal(); }
+          });
+        }catch(e){ alert('No se pudo conectar a Firebase: '+e.message); }
+      });
+
+      // initial render
+      renderTable(); updateChart();
+
+      // auto-load sheet on first open (optional): uncomment if quieres que cargue al abrir
+      // loadFromSheet(sheetDefault);
+    });
+  </script>
+</body>
+</html>
