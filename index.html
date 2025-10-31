@@ -7,9 +7,6 @@
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-  <!-- Firebase v8 (opcional) -->
-  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
 
   <style>
     :root{--blue:#3498db;--muted:#6c757d}
@@ -31,13 +28,16 @@
     .small-note{font-size:13px;color:#666}
     .muted{color:#666;font-size:13px}
     a.link{color:var(--blue)}
+    .legend { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .legend-item { display:flex; align-items:center; gap:6px; font-size:13px; }
+    .swatch { width:14px; height:14px; border-radius:3px; display:inline-block; }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <h1>Inundaciones — Santiago de Cali (2010-2011)</h1>
-      <p class="small">Lee datos desde Google Sheets, visualiza tabla y gráfico. Opcional: sincroniza con Firebase.</p>
+      <p class="small">Historicidad inundaciones santiago de cali.</p>
     </header>
 
     <div class="grid">
@@ -52,20 +52,18 @@
             <strong>Registros</strong>
             <div class="controls">
               <button id="btnDownloadChart">Descargar gráfico</button>
-              <button id="btnExportJson">Exportar JSON</button>
-              <button id="btnImportJson">Importar JSON</button>
               <button id="btnLoadSheet">Cargar desde Google Sheets</button>
             </div>
           </div>
 
-          <table id="table">
+          <table id="table" aria-live="polite">
             <thead>
               <tr><th>Año</th><th>Título</th><th>Fuente</th><th>Enlace</th></tr>
             </thead>
             <tbody></tbody>
           </table>
 
-          <input type="file" id="fileInput" accept="application/json" style="display:none" />
+          <div id="legend" class="legend" aria-hidden="false" style="margin-top:10px"></div>
         </div>
       </div>
 
@@ -86,17 +84,14 @@
           <div>
             <div class="muted">Google Sheets (CSV público)</div>
             <input id="sheetUrl" value="https://docs.google.com/spreadsheets/d/e/2PACX-1vT0kOk-fhgfhPwJaL3tARqOx6g6evxHWunjSkKpc5VeitLjYT4I0tL1kZdfzLK9CzBvq7ZCXybQIehl/pub?output=csv" />
-            <div class="small-note">Este link debe terminar en <code>?output=csv</code> (ya lo tienes). Pulsa "Cargar desde Google Sheets".</div>
+            <div class="small-note">El enlace debe terminar en <code>?output=csv</code>. Pulsa "Cargar desde Google Sheets".</div>
 
             <hr style="margin:10px 0" />
 
-            <div class="muted">Firebase (opcional)</div>
-            <textarea id="firebaseCfg" placeholder='Pega aquí el objeto JSON de firebaseConfig (ej: {"apiKey":"...","authDomain":"...","databaseURL":"..."} ).'></textarea>
             <div style="display:flex;gap:8px;margin-top:8px">
-              <button id="btnConnectFirebase">Conectar Firebase</button>
               <button id="btnClearLocal">Borrar datos locales</button>
             </div>
-            <div class="small-note" style="margin-top:8px">Si conectas Firebase los registros se sincronizarán en tiempo real. Usa esto solo si confías en la configuración y en las reglas de tu BD.</div>
+            <div class="small-note" style="margin-top:8px">Los registros añadidos manualmente se guardan en este equipo (localStorage) y se mezclarán con los de la hoja cuando la cargues.</div>
           </div>
         </div>
       </aside>
@@ -105,9 +100,10 @@
 
 <script>
 (function(){
-  // --- Config & keys for localStorage ---
-  const STORAGE_NEWS = 'inundaciones_news_v2';
-  const STORAGE_DATA = 'inundaciones_counts_v2';
+  // keys
+  const KEY_NEWS = 'inundaciones_news_v3';
+  const KEY_COUNTS = 'inundaciones_counts_v3';
+  const KEY_COLORS = 'inundaciones_colors_v3';
 
   // DOM
   const tbody = document.querySelector('#table tbody');
@@ -119,38 +115,97 @@
   const fieldLink = document.getElementById('fieldLink');
   const sheetUrlInput = document.getElementById('sheetUrl');
   const btnLoadSheet = document.getElementById('btnLoadSheet');
-  const btnExportJson = document.getElementById('btnExportJson');
-  const btnImportJson = document.getElementById('btnImportJson');
-  const fileInput = document.getElementById('fileInput');
   const btnDownloadChart = document.getElementById('btnDownloadChart');
-  const btnConnectFirebase = document.getElementById('btnConnectFirebase');
-  const firebaseCfgInput = document.getElementById('firebaseCfg');
   const btnClearLocal = document.getElementById('btnClearLocal');
+  const legendDiv = document.getElementById('legend');
 
-  // State
-  let savedNews = loadLocal(STORAGE_NEWS) || [];
-  let newsCounts = loadLocal(STORAGE_DATA) || {};
-  let firebaseDB = null;
+  // state
+  let savedNews = load(KEY_NEWS) || [];
+  let newsCounts = load(KEY_COUNTS) || {};
+  // mapping year->color (string hex)
+  let colorMap = load(KEY_COLORS) || {};
 
-  // Chart
-  const chart = new Chart(chartCtx, {
-    type: 'bar',
-    data: { labels: Object.keys(newsCounts), datasets: [{ label:'Número de noticias', data: Object.values(newsCounts), backgroundColor:'#3498db'}] },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false}, title:{display:true,text:'Noticias sobre inundaciones (2010-2011)'} } }
+  // fixed colors for common years (you can customize)
+  const fixedColors = {
+    "2010": "#2E86AB", // azul
+    "2011": "#2ECC71", // verde
+    "2012": "#F39C12",
+    "2013": "#9B59B6",
+    "2014": "#E74C3C"
+  };
+
+  // ensure existing fixed colors in colorMap
+  Object.keys(fixedColors).forEach(y=>{
+    if(!colorMap[y]) colorMap[y] = fixedColors[y];
   });
 
-  // Utilities
-  function saveLocal(){
-    try{
-      localStorage.setItem(STORAGE_NEWS, JSON.stringify(savedNews));
-      localStorage.setItem(STORAGE_DATA, JSON.stringify(newsCounts));
-    }catch(e){
-      console.warn('No se pudo guardar localStorage', e);
-    }
+  // create chart
+  const chart = new Chart(chartCtx, {
+    type: 'bar',
+    data: { labels: Object.keys(newsCounts), datasets: [{ label:'Número de noticias', data: Object.values(newsCounts), backgroundColor: generateColors(Object.keys(newsCounts)) }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{display:false}, tooltip:{mode:'index',intersect:false}, title:{display:true,text:'Noticias sobre inundaciones (por año)'} }, scales:{ x:{beginAtZero:true}, y:{beginAtZero:true,precision:0} } }
+  });
+
+  // helpers: local storage
+  function load(k){ try{ const v = localStorage.getItem(k); return v? JSON.parse(v): null; }catch(e){ return null; } }
+  function save(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){ console.warn('No se pudo guardar', e); } }
+
+  // helper: create pastel random color for year
+  function randomPastel(){ const h = Math.floor(Math.random()*360); const s = 65; const l = 70; return hslToHex(h,s,l); }
+  function hslToHex(h,s,l){
+    s/=100; l/=100;
+    const k = n => (n + h/30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(Math.min(k(n) - 3, 9 - k(n), 1), -1);
+    const toHex = x => Math.round(x * 255).toString(16).padStart(2,'0');
+    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
   }
-  function loadLocal(key){
-    try{ const v = localStorage.getItem(key); return v? JSON.parse(v): null; }catch(e){ return null; }
+
+  // generate colors array for labels (ensures colorMap contains each year)
+  function generateColors(labels){
+    return labels.map(label => {
+      if(!colorMap[label]){
+        // if fixed color exists use it
+        if(fixedColors[label]) colorMap[label] = fixedColors[label];
+        else colorMap[label] = randomPastel();
+        save(KEY_COLORS, colorMap);
+      }
+      return colorMap[label];
+    });
   }
+
+  // render legend
+  function renderLegend(){
+    legendDiv.innerHTML = '';
+    const labels = Object.keys(newsCounts);
+    labels.forEach(lbl=>{
+      const item = document.createElement('div');
+      item.className = 'legend-item';
+      const sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = colorMap[lbl] || '#ccc';
+      const txt = document.createElement('span');
+      txt.textContent = `${lbl} — ${newsCounts[lbl] || 0}`;
+      item.appendChild(sw);
+      item.appendChild(txt);
+      legendDiv.appendChild(item);
+    });
+  }
+
+  // update chart dataset/colors and legend
+  function refreshChart(){
+    const labels = Object.keys(newsCounts);
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = labels.map(l => newsCounts[l] || 0);
+    chart.data.datasets[0].backgroundColor = generateColors(labels);
+    chart.update();
+    renderLegend();
+    save(KEY_NEWS, savedNews);
+    save(KEY_COUNTS, newsCounts);
+    save(KEY_COLORS, colorMap);
+  }
+
+  // render table
   function renderTable(){
     tbody.innerHTML = '';
     savedNews.forEach(item=>{
@@ -159,18 +214,8 @@
       tbody.appendChild(tr);
     });
   }
-  function updateChart(){
-    chart.data.labels = Object.keys(newsCounts);
-    chart.data.datasets[0].data = Object.values(newsCounts);
-    chart.update();
-    saveLocal();
-  }
 
-  // basic escaping
-  function escapeHtml(s){ if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function escapeAttr(s){ return String(s).replace(/"/g,'%22'); }
-
-  // Add entry
+  // add entry form
   form.addEventListener('submit', (e)=>{
     e.preventDefault();
     const year = String(fieldYear.value).trim();
@@ -179,65 +224,15 @@
     const source = (fieldSource.value||'').trim();
     const link = (fieldLink.value||'').trim();
     const entry = { year, title, source, link, createdAt: new Date().toISOString() };
-    // add locally
     savedNews.push(entry);
     newsCounts[year] = (newsCounts[year]||0) + 1;
-    renderTable(); updateChart();
-    // push to firebase if connected
-    if(firebaseDB){
-      try{ firebaseDB.ref('noticias').push(entry); }catch(err){ console.warn('Firebase push failed', err); }
-    }
-    form.reset();
+    fieldYear.value = ''; fieldTitle.value = ''; fieldSource.value = ''; fieldLink.value = '';
+    renderTable();
+    refreshChart();
   });
 
-  // Export JSON
-  btnExportJson.addEventListener('click', ()=>{
-    const data = { savedNews, newsCounts };
-    const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'inundaciones_cali_data.json'; a.click(); URL.revokeObjectURL(url);
-  });
-
-  // Import JSON
-  btnImportJson.addEventListener('click', ()=> fileInput.click());
-  fileInput.addEventListener('change', (ev)=>{
-    const f = ev.target.files[0]; if(!f) return;
-    const reader = new FileReader();
-    reader.onload = ()=> {
-      try{
-        const obj = JSON.parse(reader.result);
-        if(obj.savedNews && obj.newsCounts){
-          // merge - avoid duplicates by title+year
-          let added=0;
-          obj.savedNews.forEach(ex=>{
-            const exists = savedNews.some(s=> s.year===ex.year && s.title===ex.title);
-            if(!exists){ savedNews.push(ex); added++; newsCounts[ex.year] = (newsCounts[ex.year]||0) + 1; }
-          });
-          if(added) { renderTable(); updateChart(); saveLocal(); alert('Se añadieron '+added+' registros'); }
-          else alert('No se añadieron registros nuevos');
-        }else alert('JSON no tiene el formato esperado');
-      }catch(e){ alert('Error leyendo JSON: '+e.message); }
-    };
-    reader.readAsText(f);
-  });
-
-  // Download chart
-  btnDownloadChart.addEventListener('click', ()=>{
-    try{
-      const dataUrl = chart.toBase64Image();
-      const a = document.createElement('a'); a.href = dataUrl; a.download = 'grafico_inundaciones.png'; a.click();
-    }catch(e){ alert('Error generando imagen: '+e.message); }
-  });
-
-  // Clear local
-  btnClearLocal.addEventListener('click', ()=>{
-    if(confirm('Borrar todos los datos locales (esto no afectará Firebase)?')){
-      savedNews = []; newsCounts = {}; renderTable(); updateChart(); saveLocal();
-    }
-  });
-
-  // Load from Google Sheets (CSV public)
-  btnLoadSheet.addEventListener('click', ()=> {
+  // load from Google Sheets (CSV public)
+  btnLoadSheet.addEventListener('click', ()=>{
     const url = (sheetUrlInput.value||'').trim();
     if(!url){ alert('Pega el enlace CSV público de Google Sheets'); return; }
     loadFromSheet(url);
@@ -246,32 +241,34 @@
   async function loadFromSheet(url){
     try{
       const res = await fetch(url);
-      if(!res.ok) throw new Error('No se pudo descargar el CSV (HTTP '+res.status+')');
+      if(!res.ok) throw new Error('HTTP '+res.status);
       const text = await res.text();
       parseCsvAndMerge(text);
-    }catch(e){
-      alert('Error al cargar la hoja: '+e.message);
-      console.error(e);
+    }catch(err){
+      alert('Error cargando la hoja: '+err.message + '. Si el problema persiste, abre la consola del navegador y copia el error.');
+      console.error(err);
     }
   }
 
   function parseCsvAndMerge(text){
-    // Simple CSV parse: split lines, handle quoted commas
     const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
-    if(lines.length<2){ alert('CSV vacío o sin filas'); return; }
-    const rows = lines.map(l=> l.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(c=> c.replace(/^"|"$/g,'')));
-    const header = rows.shift().map(h=> h.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')); // remove accents
-    const idxYear = header.findIndex(h=> /ano|año|year/.test(h));
-    const idxTitle = header.findIndex(h=> /titulo|title/.test(h));
-    const idxSource = header.findIndex(h=> /fuente|source/.test(h));
-    const idxLink = header.findIndex(h=> /enlace|link|url/.test(h));
+    if(lines.length < 2){ alert('CSV vacío o sin filas.'); return; }
+    // split respecting quoted commas
+    const rows = lines.map(l => l.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(c => c.replace(/^"|"$/g,'')));
+    const header = rows.shift().map(h => h.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''));
+    const idxYear = header.findIndex(h => /ano|año|year/.test(h));
+    const idxTitle = header.findIndex(h => /titulo|title/.test(h));
+    const idxSource = header.findIndex(h => /fuente|source/.test(h));
+    const idxLink = header.findIndex(h => /enlace|link|url/.test(h));
+
     let added = 0;
     rows.forEach(r=>{
-      const year = idxYear>=0? (r[idxYear]||'').trim() : (r[0]||'').trim();
-      const title = idxTitle>=0? (r[idxTitle]||'').trim() : (r[1]||'').trim();
-      const source = idxSource>=0? (r[idxSource]||'').trim() : (r[2]||'').trim();
-      const link = idxLink>=0? (r[idxLink]||'').trim() : (r[3]||'').trim();
+      const year = idxYear>=0 ? (r[idxYear]||'').trim() : (r[0]||'').trim();
+      const title = idxTitle>=0 ? (r[idxTitle]||'').trim() : (r[1]||'').trim();
+      const source = idxSource>=0 ? (r[idxSource]||'').trim() : (r[2]||'').trim();
+      const link = idxLink>=0 ? (r[idxLink]||'').trim() : (r[3]||'').trim();
       if(!year || !title) return;
+      // avoid duplicates: same year + title
       const exists = savedNews.some(s => s.year === year && s.title === title);
       if(!exists){
         const entry = { year, title, source, link, createdAt: new Date().toISOString() };
@@ -280,54 +277,40 @@
         added++;
       }
     });
-    if(added>0){ renderTable(); updateChart(); saveLocal(); alert('Se añadieron '+added+' registros desde la hoja'); }
-    else alert('No se agregaron registros nuevos desde la hoja');
+    if(added > 0){
+      renderTable();
+      refreshChart();
+      alert('Se añadieron ' + added + ' registros desde la hoja.');
+    } else {
+      alert('No se agregaron registros nuevos desde la hoja (posible duplicación).');
+    }
   }
 
-  // Firebase connect (optional)
-  btnConnectFirebase.addEventListener('click', ()=>{
-    const text = (firebaseCfgInput.value||'').trim();
-    if(!text){ alert('Pega el objeto JSON de firebaseConfig en el campo y luego pulsa Conectar'); return; }
-    let cfg = null;
+  // download chart image
+  btnDownloadChart.addEventListener('click', ()=>{
     try{
-      // try parse as JSON
-      cfg = JSON.parse(text);
-    }catch(e){
-      alert('El firebaseConfig debe pegarse como JSON válido (usa comillas dobles). Error: '+e.message); return;
-    }
-    try{
-      // initialize firebase (v8)
-      firebase.initializeApp(cfg);
-      firebaseDB = firebase.database();
-      alert('Firebase conectado. Se sincronizarán los datos existentes (no destructivo).');
-      // push local to firebase (non-destructive)
-      savedNews.forEach(item => {
-        try{ firebaseDB.ref('noticias').push(item); }catch(e){ console.warn('push error', e); }
-      });
-      // listen for remote changes
-      firebaseDB.ref('noticias').on('value', snapshot => {
-        const val = snapshot.val();
-        if(!val) return;
-        // flatten and merge
-        const arr = Object.values(val);
-        let added = 0;
-        arr.forEach(entry => {
-          const exists = savedNews.some(s => s.year === entry.year && s.title === entry.title);
-          if(!exists){ savedNews.push(entry); newsCounts[entry.year] = (newsCounts[entry.year]||0) + 1; added++; }
-        });
-        if(added){ renderTable(); updateChart(); saveLocal(); }
-      });
-    }catch(err){
-      alert('No se pudo inicializar Firebase: '+err.message);
-      console.error(err);
+      const url = chart.toBase64Image();
+      const a = document.createElement('a'); a.href = url; a.download = 'grafico_inundaciones.png'; a.click();
+    }catch(e){ alert('Error generando imagen: '+e.message); }
+  });
+
+  // clear local
+  btnClearLocal.addEventListener('click', ()=>{
+    if(confirm('Borrar todos los datos locales? (esto no afecta la hoja de Google)')){
+      savedNews = []; newsCounts = {}; colorMap = {}; // reset all
+      // reapply fixed colors
+      Object.keys(fixedColors).forEach(y => colorMap[y] = fixedColors[y]);
+      renderTable(); refreshChart();
     }
   });
 
-  // initial render
-  renderTable(); updateChart();
+  // helpers
+  function escapeHtml(s){ if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function escapeAttr(s){ if(!s) return ''; return String(s).replace(/"/g,'%22'); }
 
-  // Auto-load sheet once on first open? (commented; you can enable)
-  // loadFromSheet(sheetUrlInput.value);
+  // initial render
+  renderTable();
+  refreshChart();
 
 })();
 </script>
