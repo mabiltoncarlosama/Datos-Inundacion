@@ -204,8 +204,7 @@
           if(!res.ok) throw new Error('No se pudo descargar CSV');
           const text = await res.text();
           // parse simple CSV (asume separador coma y que la primera fila es encabezado)
-          const lines = text.split('
-').map(l=>l.trim()).filter(Boolean);
+          const lines = text.split(').map(l=>l.trim()).filter(Boolean);
           const rows = lines.map(l=> l.split(/,(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)/).map(c=>c.replace(/^\"|\"$/g,'')));
           const header = rows.shift();
           // detect columns: año,titulo,fuente,enlace (flexible)
@@ -279,3 +278,4 @@
   </script>
 </body>
 </html>
+
